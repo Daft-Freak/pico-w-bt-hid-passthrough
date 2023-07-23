@@ -25,6 +25,8 @@
 #include "usb_descriptors.h"
 
 // bt
+#define INQUIRY_INTERVAL 5
+
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 
 static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size)
@@ -34,12 +36,39 @@ static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
         switch(hci_event_packet_get_type(packet))
         {
             case BTSTACK_EVENT_STATE:
-                if(btstack_event_state_get_state(packet) == HCI_STATE_WORKING) {
+                if(btstack_event_state_get_state(packet) == HCI_STATE_WORKING)
+                {
                     bd_addr_t local_addr;
                     gap_local_bd_addr(local_addr);
                     printf("BTstack up and running on %s.\n", bd_addr_to_str(local_addr));
+
+                    gap_inquiry_start(INQUIRY_INTERVAL);
                 }
                 break;
+
+            // gap inquery events
+            case GAP_EVENT_INQUIRY_RESULT:
+            {
+                bd_addr_t addr;
+                const char *name = nullptr;
+
+                gap_event_inquiry_result_get_bd_addr(packet, addr);
+
+                auto cod = gap_event_inquiry_result_get_class_of_device(packet);
+
+                // TODO: else request?
+                if(gap_event_inquiry_result_get_name_available(packet))
+                    name = (const char *)gap_event_inquiry_result_get_name(packet);
+
+                printf("Found %s CoD %06X name %s\n",  bd_addr_to_str(addr), cod, name ? name : "??");
+                break;
+            }
+
+            case GAP_EVENT_INQUIRY_COMPLETE:
+                // scan again
+                gap_inquiry_start(INQUIRY_INTERVAL);
+                break;
+
             default:
                 break;
         }
