@@ -22,8 +22,6 @@
 #undef HID_REPORT_TYPE_OUTPUT
 #undef HID_REPORT_TYPE_FEATURE
 
-#include "usb_descriptors.h"
-
 // bt
 #define INQUIRY_INTERVAL 5
 #define MAX_ATTRIBUTE_VALUE_SIZE 300
@@ -48,6 +46,9 @@ static ConnectionState state = ConnectionState::Scan;
 
 static bd_addr_t connect_addr;
 static bool have_addr = false;
+
+static uint8_t *report_data = nullptr;
+static int report_len = 0;
 
 static void start_scan()
 {
@@ -153,8 +154,19 @@ static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
                     case HID_SUBEVENT_DESCRIPTOR_AVAILABLE:
                     {
                         auto status = hid_subevent_descriptor_available_get_status(packet);
-                        if(status == ERROR_CODE_SUCCESS)
-                            printf("got descriptor\n");
+                        if(status == ERROR_CODE_SUCCESS) {
+                            extern uint8_t desc_configuration[]; //
+
+                            auto desc_len = hid_descriptor_storage_get_descriptor_len(hid_host_cid);
+                            printf("got descriptor len %i\n", desc_len);
+
+                            // set report descriptor len
+                            desc_configuration[25] = desc_len;
+                            desc_configuration[26] = desc_len >> 8;
+
+                            // should be ready now
+                            tud_connect();
+                        }
                         break;
                     }
 
@@ -164,6 +176,17 @@ static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
                         auto len = hid_subevent_report_get_report_len(packet);
 
                         printf("got report len %i\n", len);
+
+                        // forward report
+                        if(report_data)
+                            printf("dropping report!\n");
+                        else
+                        {
+                            // there's an extra byte?
+                            report_data = new uint8_t[len - 1];
+                            report_len = len - 1;
+                            memcpy(report_data, report + 1, len);
+                        }
                         break;
                     }
 
@@ -185,6 +208,13 @@ static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
 }
 
 // usb
+extern uint8_t desc_configuration[];
+
+uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
+{
+  return hid_descriptor_storage_get_descriptor_data(hid_host_cid);
+}
+
 void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint8_t len)
 {
 }
@@ -236,6 +266,7 @@ int main()
         
     // usb init
     tusb_init();
+    tud_disconnect();
 
     while(true)
     {
@@ -248,7 +279,13 @@ int main()
 
         tud_task();
 
-        //tud_hid_report(REPORT_ID_GAMEPAD, &report, sizeof(report));
+        if(report_data && tud_connected())
+        {
+            tud_hid_report(0, report_data, report_len);
+        
+            delete[] report_data;
+            report_data = nullptr;
+        }
 
         sleep_ms(1);
     }
