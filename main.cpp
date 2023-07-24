@@ -26,8 +26,35 @@
 
 // bt
 #define INQUIRY_INTERVAL 5
+#define MAX_ATTRIBUTE_VALUE_SIZE 300
 
 static btstack_packet_callback_registration_t hci_event_callback_registration;
+
+static uint8_t hid_descriptor_storage[MAX_ATTRIBUTE_VALUE_SIZE];
+
+// TODO: only HID_PROTOCOL_MODE_REPORT works on Switch Pro Controller (bug?)
+static hid_protocol_mode_t hid_host_report_mode = HID_PROTOCOL_MODE_REPORT;//_WITH_FALLBACK_TO_BOOT;
+static uint16_t hid_host_cid = 0;
+
+enum class ConnectionState
+{
+    Scan,
+    StartConnection,
+    Connecting,
+    Connected
+};
+
+static ConnectionState state = ConnectionState::Scan;
+
+static bd_addr_t connect_addr;
+static bool have_addr = false;
+
+static void start_scan()
+{
+    state = ConnectionState::Scan;
+    have_addr = false;
+    gap_inquiry_start(INQUIRY_INTERVAL);
+}
 
 static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size)
 {
@@ -42,7 +69,7 @@ static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
                     gap_local_bd_addr(local_addr);
                     printf("BTstack up and running on %s.\n", bd_addr_to_str(local_addr));
 
-                    gap_inquiry_start(INQUIRY_INTERVAL);
+                    start_scan();
                 }
                 break;
 
@@ -60,14 +87,96 @@ static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
                 if(gap_event_inquiry_result_get_name_available(packet))
                     name = (const char *)gap_event_inquiry_result_get_name(packet);
 
-                printf("Found %s CoD %06X name %s\n",  bd_addr_to_str(addr), cod, name ? name : "??");
+                printf("Found %s CoD %06X name %s\n", bd_addr_to_str(addr), cod, name ? name : "??");
+
+                if(!have_addr)
+                {
+                    // try to connect to everything
+                    // TODO: probably not the best idea
+                    int majorClass = (cod >> 8) & 0x1F;
+                    if(majorClass == 0b00101) // peripheral
+                    {
+                        memcpy(connect_addr, addr, sizeof(bd_addr_t));
+                        have_addr = true;
+                    }
+                }
+
                 break;
             }
 
             case GAP_EVENT_INQUIRY_COMPLETE:
-                // scan again
-                gap_inquiry_start(INQUIRY_INTERVAL);
+                printf("inquiry complete\n");
+
+                if(have_addr)
+                    state = ConnectionState::StartConnection;
+                else if(state == ConnectionState::Scan)
+                    start_scan(); // scan again
                 break;
+
+            // hid event
+            case HCI_EVENT_HID_META:
+            {
+                switch(hci_event_hid_meta_get_subevent_code(packet))
+                {
+                    case HID_SUBEVENT_INCOMING_CONNECTION:
+                        printf("incoming conn\n");
+                        hid_host_decline_connection(hid_subevent_incoming_connection_get_hid_cid(packet));
+                        break;
+
+                    case HID_SUBEVENT_CONNECTION_OPENED:
+                    {
+                        auto status = hid_subevent_connection_opened_get_status(packet);
+
+                        if(status == ERROR_CODE_SUCCESS)
+                        {
+                            printf("connected\n");
+                            state = ConnectionState::Connected;
+                        }
+                        else
+                        {
+                            // drop key if security error
+                            // TODO: is this a hack?
+                            if(status == L2CAP_CONNECTION_RESPONSE_RESULT_REFUSED_SECURITY)
+                            {
+                                printf("drop key?\n");
+                                gap_drop_link_key_for_bd_addr(connect_addr);
+                            }
+
+                            // TODO: try different device?
+                            printf("Connection failed: %x\n", status);
+                            start_scan();
+                        }
+
+                        break;
+                    }
+
+                    case HID_SUBEVENT_DESCRIPTOR_AVAILABLE:
+                    {
+                        auto status = hid_subevent_descriptor_available_get_status(packet);
+                        if(status == ERROR_CODE_SUCCESS)
+                            printf("got descriptor\n");
+                        break;
+                    }
+
+                    case HID_SUBEVENT_REPORT:
+                    {
+                        auto report = hid_subevent_report_get_report(packet);
+                        auto len = hid_subevent_report_get_report_len(packet);
+
+                        printf("got report len %i\n", len);
+                        break;
+                    }
+
+                    case HID_SUBEVENT_CONNECTION_CLOSED:
+                    {
+                        printf("disconnected\n");
+
+                        start_scan();
+                        break;
+                    }
+                }
+                break;
+            }
 
             default:
                 break;
@@ -100,7 +209,23 @@ int main()
         return -1;
     }
 
-    // enabled EIR
+    l2cap_init();
+
+#ifdef ENABLE_BLE
+    sm_init();
+#endif
+
+    // HID host
+    hid_host_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
+    hid_host_register_packet_handler(bt_packet_handler);
+
+    // Allow sniff mode requests by HID device and support role switch
+    gap_set_default_link_policy_settings(LM_LINK_POLICY_ENABLE_SNIFF_MODE | LM_LINK_POLICY_ENABLE_ROLE_SWITCH);
+
+    // try to become master on incoming connections
+    hci_set_master_slave_policy(HCI_ROLE_MASTER);
+
+    // enable EIR
     hci_set_inquiry_mode(INQUIRY_MODE_RSSI_AND_EIR);
 
     hci_event_callback_registration.callback = &bt_packet_handler;
@@ -114,6 +239,13 @@ int main()
 
     while(true)
     {
+        if(state == ConnectionState::StartConnection)
+        {
+            printf("connecting to %s...\n", bd_addr_to_str(connect_addr));
+            hid_host_connect(connect_addr, hid_host_report_mode, &hid_host_cid);
+            state = ConnectionState::Connecting;
+        }
+
         tud_task();
 
         //tud_hid_report(REPORT_ID_GAMEPAD, &report, sizeof(report));
