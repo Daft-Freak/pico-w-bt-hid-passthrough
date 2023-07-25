@@ -224,9 +224,14 @@ int main()
     {
         if(state == ConnectionState::StartConnection)
         {
+            // lock context
+            async_context_acquire_lock_blocking(cyw43_arch_async_context());
+
             printf("connecting to %s...\n", bd_addr_to_str(connect_addr));
             hid_host_connect(connect_addr, hid_host_report_mode, &hid_host_cid);
             state = ConnectionState::Connecting;
+
+            async_context_release_lock(cyw43_arch_async_context());
         }
 
         usb_update();
