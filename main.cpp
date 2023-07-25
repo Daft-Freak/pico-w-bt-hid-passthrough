@@ -152,9 +152,16 @@ static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
                 switch(hci_event_hid_meta_get_subevent_code(packet))
                 {
                     case HID_SUBEVENT_INCOMING_CONNECTION:
-                        printf("incoming conn\n");
-                        hid_host_decline_connection(hid_subevent_incoming_connection_get_hid_cid(packet));
+                    {
+                        bd_addr_t addr;
+                        hid_subevent_incoming_connection_get_address(packet, addr);
+
+                        printf("incoming conn from%s\n", bd_addr_to_str(addr));
+
+                        hid_host_accept_connection(hid_subevent_incoming_connection_get_hid_cid(packet), hid_host_report_mode);
+                       
                         break;
+                    }
 
                     case HID_SUBEVENT_CONNECTION_OPENED:
                     {
