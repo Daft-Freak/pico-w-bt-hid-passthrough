@@ -40,6 +40,55 @@ static void start_scan()
     gap_inquiry_start(INQUIRY_INTERVAL);
 }
 
+static uint8_t attribute_value[4];
+
+static void handle_sdp_client_query_result(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size)
+{
+    switch(hci_event_packet_get_type(packet))
+    {
+        case SDP_EVENT_QUERY_ATTRIBUTE_VALUE:
+        {
+            auto off = sdp_event_query_attribute_byte_get_data_offset(packet);
+            auto len = sdp_event_query_attribute_byte_get_attribute_length(packet);
+
+            if(len <= sizeof(attribute_value))
+            {
+                attribute_value[off] = sdp_event_query_attribute_byte_get_data(packet);
+                if(off + 1 == len)
+                {
+                    // check for VID/PIT attribs
+                    auto attrib_id = sdp_event_query_attribute_byte_get_attribute_id(packet);
+                    if(attribute_value[0] == 0x09/*16-bit UINT*/ && attrib_id == BLUETOOTH_ATTRIBUTE_VENDOR_ID)
+                    {
+                        auto vid = attribute_value[1] << 8 | attribute_value[2];
+                        printf("vid %04X\n", vid);
+                    }
+                    else if(attribute_value[0] == 0x09/*16-bit UINT*/ && attrib_id == BLUETOOTH_ATTRIBUTE_PRODUCT_ID)
+                    {
+                        auto pid = attribute_value[1] << 8 | attribute_value[2];
+                        printf("pid %04X\n", pid);
+                    }
+                }
+            }
+
+            break;
+        }
+
+        case SDP_EVENT_QUERY_COMPLETE:
+        {
+            auto status = sdp_event_query_complete_get_status(packet);
+            if(status)
+                printf("SDP query failed %02x\n", status);
+            else
+                printf("SDP query done.\n");
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
 static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size)
 {
     if(packet_type == HCI_EVENT_PACKET)
@@ -115,6 +164,9 @@ static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
                         {
                             printf("connected\n");
                             state = ConnectionState::Connected;
+
+                            // get vid/pid
+                            sdp_client_query_uuid16(&handle_sdp_client_query_result, connect_addr, BLUETOOTH_SERVICE_CLASS_PNP_INFORMATION);
                         }
                         else
                         {
