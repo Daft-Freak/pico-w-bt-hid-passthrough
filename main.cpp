@@ -6,21 +6,7 @@
 
 #include "btstack.h"
 
-// btstack and tinyusb define conflicting hid enums...
-// TODO: avoid this
-#define hid_report_type_t usb_hid_report_type_t
-#define HID_REPORT_TYPE_INVALID USB_HID_REPORT_TYPE_INVALID
-#define HID_REPORT_TYPE_INPUT USB_HID_REPORT_TYPE_INPUT
-#define HID_REPORT_TYPE_OUTPUT USB_HID_REPORT_TYPE_OUTPUT
-#define HID_REPORT_TYPE_FEATURE USB_HID_REPORT_TYPE_FEATURE
-
-#include "tusb.h"
-
-#undef hid_report_type_t
-#undef HID_REPORT_TYPE_INVALID
-#undef HID_REPORT_TYPE_INPUT
-#undef HID_REPORT_TYPE_OUTPUT
-#undef HID_REPORT_TYPE_FEATURE
+#include "usb.hpp"
 
 // bt
 #define INQUIRY_INTERVAL 5
@@ -46,9 +32,6 @@ static ConnectionState state = ConnectionState::Scan;
 
 static bd_addr_t connect_addr;
 static bool have_addr = false;
-
-static uint8_t *report_data = nullptr;
-static int report_len = 0;
 
 static void start_scan()
 {
@@ -155,17 +138,14 @@ static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
                     {
                         auto status = hid_subevent_descriptor_available_get_status(packet);
                         if(status == ERROR_CODE_SUCCESS) {
-                            extern uint8_t desc_configuration[]; //
-
                             auto desc_len = hid_descriptor_storage_get_descriptor_len(hid_host_cid);
+                            auto desc = hid_descriptor_storage_get_descriptor_data(hid_host_cid);
                             printf("got descriptor len %i\n", desc_len);
 
-                            // set report descriptor len
-                            desc_configuration[25] = desc_len;
-                            desc_configuration[26] = desc_len >> 8;
+                            usb_set_hid_descriptor(desc, desc_len);
 
                             // should be ready now
-                            tud_connect();
+                            usb_set_connected(true);
                         }
                         break;
                     }
@@ -178,15 +158,8 @@ static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
                         printf("got report len %i\n", len);
 
                         // forward report
-                        if(report_data)
-                            printf("dropping report!\n");
-                        else
-                        {
-                            // there's an extra byte?
-                            report_data = new uint8_t[len - 1];
-                            report_len = len - 1;
-                            memcpy(report_data, report + 1, len);
-                        }
+                        // there's an extra byte?
+                        usb_queue_report(report + 1, len - 1);
                         break;
                     }
 
@@ -207,26 +180,6 @@ static void bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
     }
 }
 
-// usb
-extern uint8_t desc_configuration[];
-
-uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
-{
-  return hid_descriptor_storage_get_descriptor_data(hid_host_cid);
-}
-
-void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint8_t len)
-{
-}
-
-uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, usb_hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen)
-{
-    return 0;
-}
-
-void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, usb_hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize)
-{
-}
 
 int main()
 {
@@ -265,8 +218,7 @@ int main()
     hci_power_control(HCI_POWER_ON);
         
     // usb init
-    tusb_init();
-    tud_disconnect();
+    usb_init();
 
     while(true)
     {
@@ -277,15 +229,7 @@ int main()
             state = ConnectionState::Connecting;
         }
 
-        tud_task();
-
-        if(report_data && tud_connected())
-        {
-            tud_hid_report(0, report_data, report_len);
-        
-            delete[] report_data;
-            report_data = nullptr;
-        }
+        usb_update();
 
         sleep_ms(1);
     }

@@ -15,6 +15,7 @@ pico_sdk_init()
 
 add_executable(bt-hid-passthrough
     main.cpp
+    usb.cpp
     usb_descriptors.c
 )
 
